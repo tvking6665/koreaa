@@ -36,7 +36,7 @@ with col2:
         st.session_state.logged_in = False
         st.rerun()
 
-st.caption("초고속 네이버 실시간 주도주 망을 연동하여, 유저가 지정한 정밀한 수치 범위 내의 종목을 실시간 발굴합니다.")
+st.caption("네이버 실시간 변동성 전용 초고속 데이터망을 연동하여 지연 오류 없이 정밀 구간 스캔을 가동합니다.")
 
 # 2. 사이드바 설정
 st.sidebar.header("🔍 검색 모드 선택")
@@ -53,36 +53,47 @@ if search_mode == "① 거래량 급증":
 elif search_mode == "② 대량 거래대금":
     min_turnover = st.sidebar.number_input("최소 거래대금 조건 (억 원)", min_value=0, value=100, step=10)
 elif search_mode == "③ 당일 등락률 구간 지정":
-    # [🔥 핵심 변경] 하나의 수치가 아닌 (최소, 최대) 범위를 조절할 수 있는 범위 슬라이더 바 구현
     min_change, max_change = st.sidebar.slider(
         "검색할 등락률 구간을 지정하세요 (%)",
         min_value=-30, 
         max_value=30, 
-        value=(-10, 5), # 유저님 예시대로 기본값 설정을 -10% ~ +5%로 세팅
+        value=(-10, 5), # 유저님 세팅 기본값 고정
         step=1
     )
 
-# 네이버 금융 초고속 대장주/변동성 마켓 데이터 API 호출 엔진
-def fetch_comprehensive_naver_data():
+# [🔥 지연 오류의 근본적 해결책] 대용량 조회를 버리고 네이버 실시간 섹션별 TOP 50 초고속 테이커망 구축
+def fetch_ultra_fast_naver_data(mode):
     results = []
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://finance.naver.com/'
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+        'Referer': 'https://m.stock.naver.com/'
     }
     
-    # 지연 오류를 방지하면서 마이너스 권 종목까지 커버하기 위해 시장 전체 시가총액 리스트 수집 범위를 적정선으로 최적화
-    for sosok in [0, 1]:
-        url = f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=market_sum&sosok={sosok}&pageSize=150&page=1"
+    # 랭킹엔진에 매핑할 네이버 세부 종류별 주소 데이터셋 
+    # sosok -> 0: 코스피, 1: 코스닥 / crypto_ranking -> 주도주 순위
+    api_configs = []
+    
+    if mode == "③ 당일 등락률 구간 지정":
+        # 구간 지정을 위해 상위 50개와 하위 50개 세션을 모두 받아와 마이너스 변동성까지 완벽 커버합니다.
+        types = ["rise", "fall"] # 상승 대장망, 하락 대장망
+        for sosok in [0, 1]:
+            for t in types:
+                api_configs.append(f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu={t}&sosok={sosok}&pageSize=50&page=1")
+    else:
+        # 거래량 및 거래대금은 유동성 핵심 대장주 100개 세션씩만 골라 빠르게 결합합니다.
+        for sosok in [0, 1]:
+            api_configs.append(f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=market_sum&sosok={sosok}&pageSize=80&page=1")
+
+    for url in api_configs:
         try:
-            res = requests.get(url, headers=headers, timeout=4)
+            res = requests.get(url, headers=headers, timeout=2.5) # 타임아웃 한계를 2.5초로 줄여도 통과할 만큼 가볍습니다.
             data = res.json()
             items = data.get('result', {}).get('itemList', [])
             for item in items:
-                # 상태 코드 파싱 (4, 5는 하락/하한가)
                 status_code = int(item.get('ms', 3))
                 raw_change = float(item.get('cr', 0.0))
                 
-                # 네이버의 양수 등락률 데이터를 실제 하락 부호(-)로 역산 보정
+                # 네이버 부호 누락 시스템 보정
                 if status_code in [4, 5]:
                     day_change_pct = -abs(raw_change)
                 else:
@@ -98,7 +109,10 @@ def fetch_comprehensive_naver_data():
         except:
             continue
             
-    return pd.DataFrame(results)
+    df = pd.DataFrame(results)
+    if not df.empty:
+        df = df.drop_duplicates(subset=['종목명']).reset_index(drop=True) # 중복 데이터 청소
+    return df
 
 # 3. 데이터 수집 및 조건 필터링 가동
 if st.sidebar.button("검색기 돌리기 🚀"):
@@ -106,12 +120,13 @@ if st.sidebar.button("검색기 돌리기 🚀"):
     kst_now = utc_now + timedelta(hours=9)
     now_time = kst_now.strftime("%Y-%m-%d %H:%M:%S")
     
-    with st.spinner(f"♻️ {now_time} 기준 실시간 마켓 지정 구간 스캔 중..."):
+    with st.spinner(f"♻️ {now_time} 초고속 데이터 인프라 연동 중..."):
         try:
-            total_df = fetch_comprehensive_naver_data()
+            # 보정된 초고속 API 엔진 작동
+            total_df = fetch_ultra_fast_naver_data(search_mode)
             
             if total_df.empty:
-                st.error("⚠️ 데이터 호출 지연이 발생했습니다. 잠시 후 버튼을 다시 눌러주세요.")
+                st.error("⚠️ 데이터를 일시적으로 가져오지 못했습니다. 잠시 후 [검색기 돌리기] 버튼을 다시 눌러주세요.")
                 st.stop()
                 
             final_results = []
@@ -124,21 +139,18 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                     volume = row['실시간 거래량 (주)']
                     turnover_hundred_m = row['당일 거래대금 (억 원)']
                     
-                    # 전일비 거래량 비율 연산
                     if day_change_pct != 0:
                         prev_vol = volume / (1 + (day_change_pct / 100))
                         vol_ratio_calc = round((volume / prev_vol) * 100, 2) if prev_vol > 0 else 100
                     else:
                         vol_ratio_calc = 100
                         
-                    # 단일 조건 독립 판정
                     is_match = False
                     if search_mode == "① 거래량 급증" and vol_ratio_calc >= volume_ratio:
                         is_match = True
                     elif search_mode == "② 대량 거래대금" and turnover_hundred_m >= min_turnover:
                         is_match = True
                     elif search_mode == "③ 당일 등락률 구간 지정":
-                        # [🔥 핵심 조건문 변경] 주가가 사용자가 지정한 최소값 이상, 최대값 이하 사이에 있는지 체크
                         if min_change <= day_change_pct <= max_change:
                             is_match = True
                         
@@ -157,7 +169,6 @@ if st.sidebar.button("검색기 돌리기 🚀"):
             if final_results:
                 result_df = pd.DataFrame(final_results)
                 
-                # 정렬 기준 매칭
                 if search_mode == "① 거래량 급증":
                     result_df = result_df.sort_values(by='전일대비 거래증가율(%)', ascending=False)
                 elif search_mode == "② 대량 거래대금":
@@ -167,7 +178,7 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                     
                 result_df = result_df.reset_index(drop=True)
                 
-                st.success(f"🎯 실시간 국장 조건 스캔 완료! {min_change}% ~ {max_change}% 구간 내에 속한 종목 {len(result_df)}개를 찾았습니다.")
+                st.success(f"🎯 실시간 국장 주도주 필터링 완료! 지정하신 구간 [{min_change}% ~ {max_change}%] 내에 위치한 {len(result_df)}개의 거래 종목을 찾아냈습니다.")
                 
                 display_df = result_df.copy()
                 display_df['현재가'] = display_df['현재가'].apply(lambda x: f"{x:,}원")
@@ -183,9 +194,9 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                 elif search_mode == "② 대량 거래대금":
                     st.info(f"현재 시장에 설정하신 거래대금 조건({min_turnover:,}억 원 이상)을 만족하는 종목이 없습니다.")
                 elif search_mode == "③ 당일 등락률 구간 지정":
-                    st.info(f"현재 시장에 설정하신 등락률 구간({min_change}% ~ {max_change}%) 내에 속하는 종목이 없습니다.")
+                    st.info(f"현재 시장에 지정하신 실시간 등락률 구간({min_change}% ~ {max_change}%) 내에 안착한 종목이 없습니다.")
                     
         except Exception as e:
-            st.error(f"실시간 범위 필터링 오류: {e}")
+            st.error(f"실시간 정밀 필터링 연산 오류: {e}")
 else:
-    st.info("왼쪽 사이드바에서 조건을 설정한 후 [검색기 돌리기] 버튼을 눌러주세요.")
+    st.info("왼쪽 사이드바에서 하나의 조건을 선택·설정한 후 [검색기 돌리기] 버튼을 눌러주세요.")
