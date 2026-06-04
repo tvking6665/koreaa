@@ -160,3 +160,21 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                     result_df = result_df.sort_values(by='정규장 등락률', ascending=False)
                     
                 result_df = result_df.reset_index(drop=True)
+                
+                st.success(f"🎯 정규장 마감일({latest_date}) 기점, 조건을 만족하는 정규장 종목 {len(result_df)}개를 찾았습니다!")
+                
+                display_df = result_df.copy()
+                display_df['정규장 현재가'] = display_df['정규장 현재가'].apply(lambda x: f"{x:,}원")
+                display_df['정규장 등락률'] = display_df['정규장 등락률'].apply(lambda x: f"{x:+.2f}%")
+                display_df['정규장 거래대금'] = display_df['정규장 거래대금'].apply(lambda x: f"{int(x):,}백만 원")
+                display_df['5일 평균 거래량(정규)'] = display_df['5일 평균 거래량(정규)'].apply(lambda x: f"{x:,}")
+                display_df['당일 정규장 거래량'] = display_df['당일 정규장 거래량'].apply(lambda x: f"{x:,}")
+                
+                st.dataframe(display_df, use_container_width=True)
+            else:
+                st.info(f"선정된 종목 풀 내에 설정하신 정규장 조건({min_change}%)을 만족하는 종목이 현재 없습니다.")
+                
+        except Exception as e:
+            st.error(f"정규장 데이터 연산 오류: {e}")
+else:
+    st.info("왼쪽 사이드바에서 조건을 세팅하고 버튼을 누르면 '순수 정규장' 데이터 기준 스캔이 가동됩니다.")
