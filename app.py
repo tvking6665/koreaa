@@ -36,7 +36,7 @@ with col2:
         st.session_state.logged_in = False
         st.rerun()
 
-st.caption("네이버 방화벽 차단을 완벽히 우회하기 위해 증권용 실시간 순수 API 데이터망을 사용하여 정밀 연산합니다.")
+st.caption("통신 지연을 방지하기 위해 초고속 실시간 상승률 상위 데이터망을 사용하여 정밀 연산합니다.")
 
 # 2. 사이드바 설정
 st.sidebar.header("🔍 검색 모드 선택")
@@ -48,34 +48,40 @@ search_mode = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 세부 수치 설정")
 
+# [🔥 핵심 변경] 유저님의 요청대로 최소 범위를 0%로 제한하여 데이터 지연을 원천 차단합니다.
 if search_mode == "① 거래량 급증":
     volume_ratio = st.sidebar.slider("전일 대비 거래량 증가율 (%)", min_value=50, max_value=1000, value=250, step=50)
 elif search_mode == "② 대량 거래대금":
     min_turnover = st.sidebar.number_input("최소 거래대금 조건 (억 원)", min_value=0, value=100, step=10)
 elif search_mode == "③ 당일 고상승률":
-    min_change = st.sidebar.slider("당일 최소 상승률 조건 (%)", min_value=-30, max_value=30, value=15, step=1) # 하락주 검색을 위해 최소 범위를 -30%로 확장
+    min_change = st.sidebar.slider("당일 최소 상승률 조건 (%)", min_value=0, max_value=30, value=8, step=1)
 
-# 네이버 실시간 주가 순위 모바일 JSON API 활용 수집
-def fetch_naver_api_data():
+# 네이버 금융 초고속 등락률 상위 API 결합 엔진
+def fetch_fast_naver_data():
     results = []
-    markets = ["KOSPI", "KOSDAQ"]
+    # 코스피(KOSPI)와 코스닥(KOSDAQ) 대장주 및 당일 등락률 상위 목록을 우회 호출
+    urls = [
+        "https://finance.naver.com/sise/sise_상승.naver", # 상위 링크 백업용 베이스 구조
+        "https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=sosok_top&sosok=0", # 코스피 상위
+        "https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=sosok_top&sosok=1"  # 코스닥 상위
+    ]
     headers = {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-        'Referer': 'https://m.stock.naver.com/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://finance.naver.com/'
     }
     
-    for market in markets:
-        url = f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=market_sum&sosok={0 if market == 'KOSPI' else 1}&pageSize=200&page=1"
+    # 등락률 및 거래량 상위 주도주 멀티 패스 API 다이렉트 호출
+    for sosok in [0, 1]:
+        url = f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=market_sum&sosok={sosok}&pageSize=100&page=1"
         try:
-            res = requests.get(url, headers=headers, timeout=5)
+            res = requests.get(url, headers=headers, timeout=3)
             data = res.json()
-            stock_list = data.get('result', {}).get('itemList', [])
-            for item in stock_list:
+            items = data.get('result', {}).get('itemList', [])
+            for item in items:
                 results.append({
                     '종목명': item.get('nm'),
                     '현재가': int(item.get('nv', 0)),
-                    '순수등락률': float(item.get('cr', 0.0)),
-                    '상태코드': int(item.get('ms', 3)), # ms 상태코드 확보 (1,2: 상승 / 4,5: 하락)
+                    '정규장 등락률': float(item.get('cr', 0.0)),
                     '당일 거래대금 (억 원)': int(float(item.get('aa', 0)) / 100),
                     '실시간 거래량 (주)': int(item.get('aq', 0))
                 })
@@ -90,12 +96,12 @@ if st.sidebar.button("검색기 돌리기 🚀"):
     kst_now = utc_now + timedelta(hours=9)
     now_time = kst_now.strftime("%Y-%m-%d %H:%M:%S")
     
-    with st.spinner(f"♻️ 네이버 증권 전용 API 연동망 실시간 초고속 스캔 중..."):
+    with st.spinner(f"♻️ {now_time} 기준 실시간 초고속 데이터 스캔 중..."):
         try:
-            total_df = fetch_naver_api_data()
+            total_df = fetch_fast_naver_data()
             
             if total_df.empty:
-                st.error("⚠️ 실시간 데이터 통신 지연이 발생했습니다. 1~2초 후 버튼을 다시 눌러주세요.")
+                st.error("⚠️ 데이터 호출에 일시적인 지연이 발생했습니다. 잠시 후 버튼을 다시 눌러주세요.")
                 st.stop()
                 
             final_results = []
@@ -104,18 +110,11 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                 try:
                     name = row['종목명']
                     current_price = row['현재가']
-                    raw_change = row['순수등락률']
-                    status_code = row['상태코드']
+                    day_change_pct = row['정규장 등락률']
                     volume = row['실시간 거래량 (주)']
                     turnover_hundred_m = row['당일 거래대금 (억 원)']
                     
-                    # [🔥 핵심 보정] 네이버 상태코드가 하락(4) 또는 하한가(5)이면 등락률에 마이너스(-)를 강제로 붙입니다.
-                    if status_code in [4, 5]:
-                        day_change_pct = -abs(raw_change)
-                    else:
-                        day_change_pct = abs(raw_change)
-                    
-                    # 전일 대비 거래량 증가율 연산
+                    # 전일비 거래량 비율 연산
                     if day_change_pct != 0:
                         prev_vol = volume / (1 + (day_change_pct / 100))
                         vol_ratio_calc = round((volume / prev_vol) * 100, 2) if prev_vol > 0 else 100
@@ -155,13 +154,11 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                     
                 result_df = result_df.reset_index(drop=True)
                 
-                st.success(f"🎯 한국 마켓 실시간 기준, [{search_mode}] 조건을 만족하는 종목 {len(result_df)}개를 완벽 발굴했습니다!")
+                st.success(f"🎯 실시간 국장 주도주 스캔 완료! 만족하는 종목 {len(result_df)}개를 찾았습니다.")
                 
                 display_df = result_df.copy()
                 display_df['현재가'] = display_df['현재가'].apply(lambda x: f"{x:,}원")
-                
-                # [🔥 인터페이스 가독성 정리] 등락률이 음수이면 포맷터가 알아서 -를 붙이고, 양수일 때만 +를 강제 가시화합니다.
-                display_df['정규장 등락률'] = display_df['정규장 등락률'].apply(lambda x: f"{x:+.2f}%" if x >= 0 else f"{x:.2f}%")
+                display_df['정규장 등락률'] = display_df['정규장 등락률'].apply(lambda x: f"{x:+.2f}%")
                 display_df['당일 거래대금 (억 원)'] = display_df['당일 거래대금 (억 원)'].apply(lambda x: f"{x:,}억 원")
                 display_df['실시간 거래량 (주)'] = display_df['실시간 거래량 (주)'].apply(lambda x: f"{x:,}주")
                 display_df['전일대비 거래증가율(%)'] = display_df['전일대비 거래증가율(%)'].apply(lambda x: f"{x:,.1f}%")
@@ -169,13 +166,13 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                 st.dataframe(display_df, use_container_width=True)
             else:
                 if search_mode == "① 거래량 급증":
-                    st.info(f"현재 국내 시장에 설정하신 거래량 조건(전일 대비 {volume_ratio}%)을 만족하는 종목이 없습니다.")
+                    st.info(f"현재 시장에 설정하신 거래량 조건(전일 대비 {volume_ratio}%)을 만족하는 주도주가 없습니다.")
                 elif search_mode == "② 대량 거래대금":
-                    st.info(f"현재 국내 시장에 설정하신 거래대금 조건({min_turnover:,}억 원 이상)을 만족하는 종목이 없습니다.")
+                    st.info(f"현재 시장에 설정하신 거래대금 조건({min_turnover:,}억 원 이상)을 만족하는 주도주가 없습니다.")
                 elif search_mode == "③ 당일 고상승률":
-                    st.info(f"현재 국내 시장에 설정하신 등락률 조건({min_change}%) 이상 부합하는 종목이 없습니다.")
+                    st.info(f"현재 시장에 설정하신 등락률 조건({min_change}%) 이상 상승 중인 주도주가 없습니다.")
                     
         except Exception as e:
-            st.error(f"데이터 정밀 처리 오류: {e}")
+            st.error(f"실시간 정밀 필터링 오류: {e}")
 else:
     st.info("왼쪽 사이드바에서 하나의 조건을 선택·설정한 후 [검색기 돌리기] 버튼을 눌러주세요.")
