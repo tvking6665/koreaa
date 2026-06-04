@@ -48,18 +48,15 @@ search_mode = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ 세부 수치 설정")
 
-volume_ratio = 400
-min_turnover = 10000  # 기본값 10,000백만 원 (100억 원)
-min_change = 8
-
+# [🔥 핵심 수정] 선택한 메뉴에 따라 '하나의 변수'만 화면에 띄우고 명확히 독립시킵니다.
 if search_mode == "① 거래량 급증":
-    volume_ratio = st.sidebar.slider("평균(5일) 대비 거래량 증가율 (%)", min_value=50, max_value=1000, value=400, step=50)
+    volume_ratio = st.sidebar.slider("평균(5일) 대비 거래량 증가율 (%)", min_value=50, max_value=1000, value=250, step=50)
 elif search_mode == "② 대량 거래대금":
     min_turnover = st.sidebar.number_input("최소 거래대금 조건 (백만 원)", min_value=0, value=10000, step=1000)
 elif search_mode == "③ 당일 고상승률":
     min_change = st.sidebar.slider("당일 최소 상승률 조건 (%)", min_value=-10, max_value=30, value=8, step=1)
 
-# 한국 시장 대장주 및 인기 종목 풀 (코스피 .KS / 코스닥 .KQ)
+# 한국 시장 대장주 및 유동성 인기 종목 풀
 @st.cache_data(ttl=3600)
 def get_kr_tickers():
     kr_stocks = {
@@ -84,32 +81,24 @@ if st.sidebar.button("검색기 돌리기 🚀"):
     kst_now = utc_now + timedelta(hours=9)
     now_time = kst_now.strftime("%Y-%m-%d %H:%M:%S")
     
-    with st.spinner(f"♻️ {now_time} 기준 국장 정규장 데이터 동기화 및 필터링 중..."):
+    with st.spinner(f"♻️ {now_time} 기준 한국 시장 정규장 데이터 분석 중..."):
         try:
             ticker_map = get_kr_tickers()
             tickers_list = list(ticker_map.keys())
             
             end_date = datetime.today() + timedelta(days=1)
-            start_date = end_date - timedelta(days=25) # 주말 제외 평일 5일을 안전하게 확보하기 위해 25일 지정
+            start_date = end_date - timedelta(days=25)
             
-            # [💡 핵심 변경] prepost=False로 설정하여 장전/장후 시간외 노이즈 거래량을 원천 차단합니다.
-            group_data = yf.download(
-                tickers_list, 
-                start=start_date.strftime("%Y-%m-%d"), 
-                end=end_date.strftime("%Y-%m-%d"), 
-                group_by='ticker', 
-                prepost=False
-            )
+            group_data = yf.download(tickers_list, start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"), group_by='ticker', prepost=False)
             
             results = []
             
             for ticker in tickers_list:
                 if ticker in group_data.columns.levels[0]:
-                    # 당일 정규장이 아직 개장하지 않았거나 거래량이 아예 없는 빈 껍데기 행 제거
                     df_stock = group_data[ticker].dropna()
                     
                     if len(df_stock) >= 2:
-                        # 오늘 정규장 데이터가 아직 안 들어왔거나 주말/새벽 시간대라면 마지막 거래 완료일 기준으로 가동
+                        # 정규장 마감 후 혹은 개장 전 빈 거래량 행 가드
                         if df_stock['Volume'].iloc[-1] == 0:
                             df_stock = df_stock.iloc[:-1]
 
@@ -119,16 +108,13 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                         latest_vol = float(df_stock['Volume'].iloc[-1])
                         latest_date = df_stock.index[-1].strftime("%Y-%m-%d")
                         
-                        # 1. 정규장 기준 실시간 등락률 계산
+                        # 지표 연산
                         day_change_pct = round(((latest_close - prev_close) / prev_close) * 100, 2)
-                        
-                        # 2. 정규장 기준 거래대금 계산 (단위: 백만 원)
                         turnover_m = round((latest_close * latest_vol) / 1_000_000, 2)
-                        
-                        # 3. 순수 정규장 기준 최근 5일 평균 거래량 연산
                         five_day_avg_vol = df_stock['Volume'].iloc[-6:-1].mean()
                         vol_ratio_calc = round((latest_vol / five_day_avg_vol) * 100, 2) if five_day_avg_vol > 0 else 0
                         
+                        # [🔥 핵심 수정] 라디오 버튼으로 선택한 '단 한 개의 조건'만 개별 판정합니다.
                         is_match = False
                         if search_mode == "① 거래량 급증" and vol_ratio_calc >= volume_ratio:
                             is_match = True
@@ -141,7 +127,7 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                             results.append({
                                 '종목명': ticker_map.get(ticker, ticker),
                                 '종목코드': ticker.split('.')[0],
-                                '정규장 현재가': int(latest_close),
+                                '정규장 종가': int(latest_close),
                                 '정규장 등락률': day_change_pct,
                                 '정규장 거래대금': turnover_m,
                                 '5일 평균 거래량(정규)': int(five_day_avg_vol),
@@ -152,6 +138,7 @@ if st.sidebar.button("검색기 돌리기 🚀"):
             if results:
                 result_df = pd.DataFrame(results)
                 
+                # 정렬 기준 매칭
                 if search_mode == "① 거래량 급증":
                     result_df = result_df.sort_values(by='거래량 증가율(%)', ascending=False)
                 elif search_mode == "② 대량 거래대금":
@@ -161,10 +148,10 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                     
                 result_df = result_df.reset_index(drop=True)
                 
-                st.success(f"🎯 정규장 마감일({latest_date}) 기점, 조건을 만족하는 정규장 종목 {len(result_df)}개를 찾았습니다!")
+                st.success(f"🎯 정규장 데이터 기준일({latest_date}) 기점, [{search_mode}] 조건을 만족하는 종목 {len(result_df)}개를 발굴했습니다!")
                 
                 display_df = result_df.copy()
-                display_df['정규장 현재가'] = display_df['정규장 현재가'].apply(lambda x: f"{x:,}원")
+                display_df['정규장 종가'] = display_df['정규장 종가'].apply(lambda x: f"{x:,}원")
                 display_df['정규장 등락률'] = display_df['정규장 등락률'].apply(lambda x: f"{x:+.2f}%")
                 display_df['정규장 거래대금'] = display_df['정규장 거래대금'].apply(lambda x: f"{int(x):,}백만 원")
                 display_df['5일 평균 거래량(정규)'] = display_df['5일 평균 거래량(정규)'].apply(lambda x: f"{x:,}")
@@ -172,9 +159,15 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                 
                 st.dataframe(display_df, use_container_width=True)
             else:
-                st.info(f"선정된 종목 풀 내에 설정하신 정규장 조건({min_change}%)을 만족하는 종목이 현재 없습니다.")
+                # [🔥 핵심 수정] 안내 메시지도 내가 고른 조건 수치에 맞게 일치시켜 가독성을 올립니다.
+                if search_mode == "① 거래량 급증":
+                    st.info(f"선정된 종목 풀 내에 설정하신 거래량 조건(평균 대비 {volume_ratio}%)을 충족하는 종목이 현재 마켓에 없습니다.")
+                elif search_mode == "② 대량 거래대금":
+                    st.info(f"선정된 종목 풀 내에 설정하신 거래대금 조건({min_turnover:,}백만 원 이상)을 충족하는 종목이 현재 마켓에 없습니다.")
+                elif search_mode == "③ 당일 고상승률":
+                    st.info(f"선정된 종목 풀 내에 설정하신 등락률 조건({min_change}%)을 충족하는 종목이 현재 마켓에 없습니다.")
                 
         except Exception as e:
             st.error(f"정규장 데이터 연산 오류: {e}")
 else:
-    st.info("왼쪽 사이드바에서 조건을 세팅하고 버튼을 누르면 '순수 정규장' 데이터 기준 스캔이 가동됩니다.")
+    st.info("왼쪽 사이드바에서 하나의 조건을 선택·설정한 후 [검색기 돌리기] 버튼을 눌러주세요.")
