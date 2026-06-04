@@ -36,9 +36,17 @@ with col2:
         st.session_state.logged_in = False
         st.rerun()
 
-st.caption("장중에는 실시간 데이터망을, 장외 시간(오후 6시 이후/주말)에는 최종 마감 데이터를 자동 연동하여 24시간 정상 작동합니다.")
+st.caption("정규장 데이터망과 시간외 단일가 데이터망을 완벽하게 분리하여 왜곡 없는 실시간 데이터를 제공합니다.")
 
 # 2. 사이드바 설정
+st.sidebar.header("⏰ 마켓 시간대 선택")
+# [🔥 핵심 추가] 정규장과 시간외장을 유저가 직접 구분하여 선택하도록 구현
+market_time_zone = st.sidebar.selectbox(
+    "조회할 마켓 타임라인을 고르세요",
+    ["일반 정규장 시세 (09:00 ~ 15:30)", "시간외 단일가 시세 (16:00 ~ 18:00)"]
+)
+
+st.sidebar.markdown("---")
 st.sidebar.header("🔍 검색 모드 선택")
 search_mode = st.sidebar.radio(
     "적용할 검색 조건을 선택하세요",
@@ -63,12 +71,12 @@ elif search_mode == "③ 당일 등락률 구간 지정":
         "검색할 등락률 구간을 지정하세요 (%)",
         min_value=-30, 
         max_value=30, 
-        value=(-10, 5),
+        value=(-10, 5) if "시간외" not in market_time_zone else (1, 10), # 시간외 기본값은 1%~10%로 유연하게 세팅
         step=1
     )
 
-# [🔥 24시간 하이브리드 엔진] 실시간망 차단/종료 시 마감 시세판 백업 구조 데이터 자동 소환
-def fetch_fail_safe_naver_data(mode):
+# [🔥 정규장 / 시간외 서버 분리 데이터 테이커 엔진]
+def fetch_segmented_naver_data(time_zone, mode):
     results = []
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -76,16 +84,26 @@ def fetch_fail_safe_naver_data(mode):
     }
     
     api_urls = []
-    # 기본 타겟: 실시간 유동 대장주 리스트 (오후 6시 이후에도 최종 잔재 데이터가 가장 오래 남는 마스터 주소)
-    for sosok in [0, 1]:
-        api_urls.append(f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=market_sum&sosok={sosok}&pageSize=150&page=1")
-        
-    # 만약 등락률 지정 모드라면 랭킹 전용 주소도 교차 보완 결합
-    if mode == "③ 당일 등락률 구간 지정":
-        for sosok in [0, 1]:
-            for t in ["rise", "fall"]:
-                api_urls.append(f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu={t}&sosok={sosok}&pageSize=50&page=1")
+    
+    # CASE 1: 사용자가 [시간외 단일가]를 선택한 경우 -> 네이버 시간외 단일가 전용 순위서버 API 연동
+    if "시간외" in time_zone:
+        # 시간외 상승 상위 50개, 하락 상위 50개, 거래량 상위 50개망을 정밀 조준 결합
+        for sosok in [0, 1]: # 코스피, 코스닥
+            api_urls.append(f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=overtime_rise&sosok={sosok}&pageSize=50&page=1")
+            api_urls.append(f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=overtime_fall&sosok={sosok}&pageSize=50&page=1")
+            api_urls.append(f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=overtime_aq&sosok={sosok}&pageSize=50&page=1")
+            
+    # CASE 2: 사용자가 [일반 정규장]을 선택한 경우 -> 정규장 전용 랭킹 및 시세판 API 연동
+    else:
+        if mode == "③ 당일 등락률 구간 지정":
+            for sosok in [0, 1]:
+                for t in ["rise", "fall"]:
+                    api_urls.append(f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu={t}&sosok={sosok}&pageSize=50&page=1")
+        else:
+            for sosok in [0, 1]:
+                api_urls.append(f"https://m.stock.naver.com/api/json/sise/siseListJson.nhn?menu=market_sum&sosok={sosok}&pageSize=100&page=1")
 
+    # API 호출 및 표준 데이터 규격화 연산
     for url in api_urls:
         try:
             res = requests.get(url, headers=headers, timeout=3.0)
@@ -96,12 +114,13 @@ def fetch_fail_safe_naver_data(mode):
                 status_code = int(item.get('ms', 3))
                 raw_change = float(item.get('cr', 0.0))
                 
-                # 부호 판정
+                # 마이너스(-) 부호 소실 방지 보정 로직
                 if status_code in [4, 5]:
                     day_change_pct = -abs(raw_change)
                 else:
                     day_change_pct = abs(raw_change)
 
+                # 거래대금 연산 (시간외용 데이터 키 규격 매핑 보완)
                 raw_aa = item.get('aa', 0)
                 turnover_hundred_m = int(float(raw_aa) / 100) if raw_aa else 0
 
@@ -115,28 +134,6 @@ def fetch_fail_safe_naver_data(mode):
         except:
             continue
             
-    # [백업 시스템 가동] 밤 시간대나 주말에 상기 API가 완전히 0을 뱉을 경우, 시세 마감 데이터셋으로 자동 전수 우회
-    if not results:
-        for sosok in [0, 1]:
-            # 데이터 마감 백업 페이지 다이렉트 연동
-            backup_url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page=1"
-            try:
-                backup_res = requests.get(backup_url, headers=headers, timeout=3.0)
-                dfs = pd.read_html(backup_res.text)
-                if len(dfs) > 1:
-                    df_clean = dfs[1].dropna(subset=['종목명'])
-                    for _, row in df_clean.iterrows():
-                        c_str = str(row['등락률']).replace('%', '').replace('+', '').strip()
-                        results.append({
-                            '종목명': str(row['종목명']),
-                            '현재가': int(row['현재가']),
-                            '정규장 등락률': float(c_str),
-                            '당일 거래대금 (억 원)': int(row['거래대금']),
-                            '실시간 거래량 (주)': int(row['거래량'])
-                        })
-            except:
-                continue
-
     df = pd.DataFrame(results)
     if not df.empty:
         df = df.drop_duplicates(subset=['종목명']).reset_index(drop=True)
@@ -148,13 +145,13 @@ if st.sidebar.button("검색기 돌리기 🚀"):
     kst_now = utc_now + timedelta(hours=9)
     now_time = kst_now.strftime("%Y-%m-%d %H:%M:%S")
     
-    with st.spinner(f"♻️ {now_time} 데이터 인프라 동기화 중..."):
+    with st.spinner(f"♻️ [{market_time_zone}] 조건에 따라 데이터망 정밀 분석 중..."):
         try:
-            # 안전 2중 레이어 엔진 호출
-            total_df = fetch_fail_safe_naver_data(search_mode)
+            # 시간대 분리형 API 가동
+            total_df = fetch_segmented_naver_data(market_time_zone, search_mode)
             
             if total_df.empty:
-                st.warning("⚠️ 현재 한국 거래소 전산 서버 점검 시간대이거나 일시적인 통신 끊김입니다. 2~3초 후 버튼을 다시 눌러주세요.")
+                st.warning(f"⚠️ 현재 [{market_time_zone}] 데이터가 비어있거나 마켓 점검 중입니다. 정규장외 시간이라면 '시간외 시세' 모드로 변경해 보세요.")
                 st.stop()
                 
             final_results = []
@@ -207,32 +204,24 @@ if st.sidebar.button("검색기 돌리기 🚀"):
                     
                 result_df = result_df.reset_index(drop=True)
                 
-                if search_mode == "② 거래대금 구간 지정":
-                    success_msg = f"🎯 검색 완료! 당일 거래대금 [{min_turnover}억 ~ {max_turnover}억] 구간 종목 {len(result_df)}개 발굴"
-                elif search_mode == "③ 당일 등락률 구간 지정":
-                    success_msg = f"🎯 검색 완료! 당일 등락률 [{min_change}% ~ {max_change}%] 구간 종목 {len(result_df)}개 발굴"
-                else:
-                    success_msg = f"🎯 검색 완료! 조건 만족 종목 {len(result_df)}개 발굴"
-                    
-                st.success(success_msg)
+                # 결과 컬럼명 동적 변경 조절 (시간외 가독성 최적화)
+                target_col_name = "정규장 등락률" if "일반" in market_time_zone else "시간외 등락률"
+                result_df = result_df.rename(columns={'정규장 등락률': target_col_name})
+                
+                st.success(f"🎯 [{market_time_zone}] 필터링 완료! {len(result_df)}개의 종목을 포착했습니다.")
                 
                 display_df = result_df.copy()
                 display_df['현재가'] = display_df['현재가'].apply(lambda x: f"{x:,}원")
-                display_df['정규장 등락률'] = display_df['정규장 등락률'].apply(lambda x: f"{x:+.2f}%" if x >= 0 else f"{x:.2f}%")
+                display_df[target_col_name] = display_df[target_col_name].apply(lambda x: f"{x:+.2f}%" if x >= 0 else f"{x:.2f}%")
                 display_df['당일 거래대금 (억 원)'] = display_df['당일 거래대금 (억 원)'].apply(lambda x: f"{x:,}억 원")
                 display_df['실시간 거래량 (주)'] = display_df['실시간 거래량 (주)'].apply(lambda x: f"{x:,}주")
                 display_df['전일대비 거래증가율(%)'] = display_df['전일대비 거래증가율(%)'].apply(lambda x: f"{x:,.1f}%")
                 
                 st.dataframe(display_df, use_container_width=True)
             else:
-                if search_mode == "① 거래량 급증":
-                    st.info(f"현재 시장에 설정하신 거래량 조건(전일 대비 {volume_ratio}%)을 만족하는 종목이 없습니다.")
-                elif search_mode == "② 거래대금 구간 지정":
-                    st.info(f"현재 시장에 설정하신 거래대금 구간({min_turnover}억 ~ {max_turnover}억 원) 내에 속하는 종목이 없습니다.")
-                elif search_mode == "③ 당일 등락률 구간 지정":
-                    st.info(f"현재 시장에 지정하신 실시간 등락률 구간({min_change}% ~ {max_change}%) 내에 안착한 종목이 없습니다.")
+                st.info(f"선택하신 조건 및 마켓 시간대({market_time_zone}) 기준, 현재 필터링 조건에 매칭되는 종목이 마켓에 존재하지 않습니다.")
                     
         except Exception as e:
-            st.error(f"실시간 정밀 필터링 연산 오류: {e}")
+            st.error(f"마켓 분리 시스템 연산 처리 오류: {e}")
 else:
-    st.info("왼쪽 사이드바에서 하나의 조건을 지정하여 범위를 설정한 뒤 [검색기 돌리기] 버튼을 눌러주세요.")
+    st.info("왼쪽 사이드바에서 상단의 [마켓 시간대]와 아래 [조건 범위]를 맞춘 뒤 [검색기 돌리기] 버튼을 눌러주세요.")
